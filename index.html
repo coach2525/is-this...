@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Semantic Distance</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", Arial, sans-serif; }
+        .fade-in { animation: fadeIn 0.8s ease-out forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-black text-white h-screen flex flex-col justify-center items-center overflow-hidden">
+    
+    <div class="w-full max-w-3xl px-6 flex flex-col justify-center">
+        
+        <!-- 見出しエリア (初期は「これは」、入力後は入力単語に変わる) -->
+        <h1 id="title-text" class="text-3xl md:text-5xl font-bold tracking-tight mb-2 transition-colors">
+            <span id="target-word" class="text-white">これ</span><span>は</span>
+            <span id="base-word-title">りんご</span>であるか？
+        </h1>
+        
+        <!-- ダウンロード進行度 -->
+        <p id="loading-status" class="text-zinc-500 text-sm mb-6">AIモデルをダウンロード中... <span id="progress-text">0%</span></p>
+
+        <!-- パーセンテージ表示エリア (見出しと入力欄の間。最初は非表示) -->
+        <div id="result-area" class="hidden mb-8">
+            <div id="score" class="text-[8rem] md:text-[12rem] font-bold tracking-tighter leading-none">0.0%</div>
+        </div>
+
+        <!-- 入力エリア (判定ボタンは入力欄の中に配置) -->
+        <div class="relative w-full mt-2">
+            <input 
+                type="text" 
+                id="word-input" 
+                class="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-6 pr-28 text-xl md:text-2xl text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 transition-colors disabled:opacity-50"
+                placeholder="単語を入力してください..."
+                disabled
+            >
+            <button 
+                id="check-btn"
+                class="absolute right-2 top-2 bottom-2 bg-white text-black px-6 rounded-xl font-semibold hover:bg-zinc-200 transition-colors disabled:opacity-50"
+                disabled
+            >
+                判定
+            </button>
+        </div>
+        
+    </div>
+
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+        import { CountUp } from 'https://cdnjs.cloudflare.com/ajax/libs/countup.js/2.8.0/countUp.min.js';
+
+        // ==========================================
+        // 【設定エリア】変数で一括管理
+        // 基準となる単語を変更したい場合はここを書き換えてください
+        // ==========================================
+        const CONFIG = {
+            baseWord: "ゲイ",
+            modelName: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2'
+        };
+
+        // 起動時に設定した単語をタイトルに反映
+        document.getElementById('base-word-title').innerText = CONFIG.baseWord;
+
+        env.allowLocalModels = false; 
+        env.useBrowserCache = true;
+
+        let extractor;
+        let countUpAnim;
+
+        // コサイン類似度計算
+        function cosineSimilarity(vecA, vecB) {
+            let dotProduct = 0, normA = 0, normB = 0;
+            for (let i = 0; i < vecA.length; i++) {
+                dotProduct += vecA[i] * vecB[i];
+                normA += vecA[i] * vecA[i];
+                normB += vecB[i] * vecB[i];
+            }
+            return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        }
+
+        // 初期化（モデルのロード）
+        async function init() {
+            try {
+                extractor = await pipeline('feature-extraction', CONFIG.modelName, {
+                    progress_callback: (data) => {
+                        if (data.status === 'progress' || data.status === 'downloading') {
+                            const percent = data.progress ? Math.round(data.progress) : 0;
+                            document.getElementById('progress-text').innerText = `${percent}%`;
+                        } else if (data.status === 'done') {
+                            document.getElementById('progress-text').innerText = `100%`;
+                        }
+                    }
+                });
+
+                // ロード完了で入力可能にする
+                document.getElementById('loading-status').style.display = 'none';
+                document.getElementById('word-input').disabled = false;
+                document.getElementById('check-btn').disabled = false;
+                document.getElementById('word-input').focus();
+            } catch (error) {
+                document.getElementById('loading-status').innerText = "エラーが発生しました。リロードしてください。";
+            }
+        }
+
+        // 判定処理
+        async function analyzeWord() {
+            const inputEl = document.getElementById('word-input');
+            const btnEl = document.getElementById('check-btn');
+            const targetWordEl = document.getElementById('target-word');
+            const resultArea = document.getElementById('result-area');
+            
+            const targetWord = inputEl.value.trim();
+            if (!targetWord) return;
+
+            // ==========================================
+            // UIの更新: 「これは」を入力単語に置き換え、少しグレーアウト
+            // ==========================================
+            targetWordEl.innerText = targetWord + " ";
+            targetWordEl.className = "text-zinc-400"; // Tailwindのグレー色を適用
+
+            inputEl.disabled = true;
+            btnEl.disabled = true;
+            btnEl.innerText = "計算中...";
+
+            // 見出しと入力欄の間にパーセンテージエリアを表示
+            resultArea.classList.remove('hidden');
+            resultArea.classList.add('fade-in');
+
+            try {
+                const baseOutput = await extractor(CONFIG.baseWord, { pooling: 'mean', normalize: true });
+                const targetOutput = await extractor(targetWord, { pooling: 'mean', normalize: true });
+                
+                const similarity = cosineSimilarity(baseOutput.data, targetOutput.data);
+                let score = Math.max(0, similarity * 100);
+
+                if (!countUpAnim) {
+                    countUpAnim = new CountUp('score', score, { decimalPlaces: 1, suffix: '%', duration: 2.5 });
+                } else {
+                    countUpAnim.update(score);
+                }
+                countUpAnim.start();
+            } catch (error) {
+                document.getElementById('score').innerText = "Error";
+            } finally {
+                inputEl.disabled = false;
+                btnEl.disabled = false;
+                btnEl.innerText = "判定";
+                inputEl.value = "";
+                inputEl.focus();
+            }
+        }
+
+        document.getElementById('check-btn').addEventListener('click', analyzeWord);
+        document.getElementById('word-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') analyzeWord();
+        });
+
+        init();
+    </script>
+</body>
+</html>
+
