@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Semantic Distance</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", Arial, sans-serif; }
+        .fade-in { animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .slide-up { animation: slideUp 1s cubic-bezier(0.16, 1, 0.3, 1) forwards; animation-delay: 0.1s; opacity: 0; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-black text-white h-screen flex flex-col justify-center items-center overflow-hidden selection:bg-white selection:text-black">
+    
+    <div class="w-full max-w-3xl px-6 flex flex-col justify-center">
+        
+        <!-- 見出しエリア: 動的変更は行わず「犬」に固定。flex items-centerでY軸ズレを修正 -->
+        <h1 id="title-text" class="text-3xl md:text-5xl font-bold tracking-tight mb-2 transition-colors duration-500 flex items-center flex-wrap">
+            <span id="target-word-container" class="overflow-hidden whitespace-nowrap transition-[background-color,width] duration-500 ease-out" style="padding: 0.1em 0.2em; margin-right: 0.1em;">
+                <span id="target-word" class="text-white transition-colors duration-500">これ</span>
+            </span><span>は</span><span id="base-word-title">犬</span><span>的か？</span>
+        </h1>
+        
+        <!-- ダウンロード・初期化ステータス -->
+        <p id="loading-status" class="text-zinc-500 text-sm mb-6 flex items-center gap-2">
+            <svg class="animate-spin h-4 w-4 text-zinc-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            AIモデルを準備中... <span id="progress-text" class="font-mono">0%</span>
+        </p>
+
+        <!-- 結果表示エリア (初期は非表示) -->
+        <div id="result-area" class="hidden mb-8 w-full flex flex-col">
+            <!-- 単語Aのメインパーセンテージ (巨大表示) -->
+            <div id="score" class="text-[7rem] md:text-[11rem] font-bold tracking-tighter leading-none text-left">0.0%</div>
+            
+            <!-- サブ結果: バーグラフとそれぞれの詳細割合 -->
+            <div id="graph-container" class="mt-4 flex flex-col gap-3 w-full max-w-2xl">
+                <!-- 数値ラベル: 単語: 相対% (絶対%) の形式 -->
+                <div class="flex justify-between text-zinc-400 text-sm md:text-base font-medium tracking-wide">
+                    <span id="label-a" class="text-white"></span>
+                    <span id="label-b"></span>
+                </div>
+                
+                <!-- モノクロバーグラフ (背景=単語B, インナー=単語A) -->
+                <div class="w-full h-3 md:h-4 bg-zinc-800 rounded-full overflow-hidden flex">
+                    <div id="bar-a" class="h-full bg-white transition-all duration-1000 ease-out" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 入力エリア -->
+        <div class="relative w-full mt-2">
+            <input 
+                type="text" 
+                id="word-input" 
+                class="w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-6 pr-28 text-xl md:text-2xl text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus:bg-zinc-800/50 transition-all duration-300 disabled:opacity-50"
+                placeholder="単語を入力してください..."
+                disabled
+            >
+            <button 
+                id="check-btn"
+                class="absolute right-2 top-2 bottom-2 bg-white text-black px-6 rounded-xl font-semibold hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:hover:bg-white"
+                disabled
+            >
+                判定
+            </button>
+        </div>
+        
+    </div>
+
+    <!-- スクリプト -->
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+        import { CountUp } from 'https://cdnjs.cloudflare.com/ajax/libs/countup.js/2.8.0/countUp.min.js';
+
+        // ==========================================
+        // 【設定】
+        // ==========================================
+        const CONFIG = {
+            wordA: "犬",     // メインの比較軸（見出し固定）
+            wordB: "猫",     // 対立軸
+            modelName: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',
+            temperature: 10  // Softmaxの温度パラメータ（高いほど差が強調され、完全一致が100%に近づく）
+        };
+
+        // 初期UIセットアップ
+        document.getElementById('base-word-title').innerText = CONFIG.wordA;
+        document.getElementById('label-a').innerText = `${CONFIG.wordA}: 0.0% (0.0%)`;
+        document.getElementById('label-b').innerText = `${CONFIG.wordB}: 0.0% (0.0%)`;
+
+        env.allowLocalModels = false; 
+        env.useBrowserCache = true;
+
+        let extractor;
+        let countUpAnim;
+        
+        // 事前計算用のベクトルキャッシュ
+        let vecA = null;
+        let vecB = null;
+
+        // コサイン類似度計算 (-1.0 to 1.0)
+        function cosineSimilarity(vectorA, vectorB) {
+            let dotProduct = 0, normA = 0, normB = 0;
+            for (let i = 0; i < vectorA.length; i++) {
+                dotProduct += vectorA[i] * vectorB[i];
+                normA += vectorA[i] * vectorA[i];
+                normB += vectorB[i] * vectorB[i];
+            }
+            if (normA === 0 || normB === 0) return 0;
+            return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        }
+
+        // Softmax with Temperature計算
+        function calculateSoftmaxRelativeScores(simA, simB, temp) {
+            const expA = Math.exp(simA * temp);
+            const expB = Math.exp(simB * temp);
+            const sum = expA + expB;
+            return {
+                relA: (expA / sum) * 100,
+                relB: (expB / sum) * 100
+            };
+        }
+
+        // アプリケーション初期化
+        async function init() {
+            try {
+                // モデルダウンロード
+                extractor = await pipeline('feature-extraction', CONFIG.modelName, {
+                    progress_callback: (data) => {
+                        if (data.status === 'progress' || data.status === 'downloading') {
+                            const percent = data.progress ? Math.round(data.progress) : 0;
+                            document.getElementById('progress-text').innerText = `${percent}%`;
+                        }
+                    }
+                });
+
+                document.getElementById('progress-text').innerText = `初期計算中...`;
+
+                // パフォーマンスのため、単語Aと単語Bのベクトルを事前計算
+                const outputA = await extractor(CONFIG.wordA, { pooling: 'mean', normalize: true });
+                const outputB = await extractor(CONFIG.wordB, { pooling: 'mean', normalize: true });
+                vecA = outputA.data;
+                vecB = outputB.data;
+
+                // UI入力準備完了
+                const loadingStatus = document.getElementById('loading-status');
+                loadingStatus.style.opacity = '0';
+                loadingStatus.style.transition = 'opacity 0.5s';
+                setTimeout(() => { loadingStatus.style.display = 'none'; }, 500);
+
+                const inputEl = document.getElementById('word-input');
+                const btnEl = document.getElementById('check-btn');
+                inputEl.disabled = false;
+                btnEl.disabled = false;
+                inputEl.focus();
+            } catch (error) {
+                console.error(error);
+                document.getElementById('loading-status').innerText = "エラーが発生しました。リロードしてください。";
+            }
+        }
+
+        // 入力単語の分析処理
+        async function analyzeWord() {
+            const inputEl = document.getElementById('word-input');
+            const btnEl = document.getElementById('check-btn');
+            const targetWordEl = document.getElementById('target-word');
+            const containerEl = document.getElementById('target-word-container');
+            const resultArea = document.getElementById('result-area');
+            const graphContainer = document.getElementById('graph-container');
+            const barA = document.getElementById('bar-a');
+            
+            const targetWord = inputEl.value.trim();
+            if (!targetWord) return;
+
+            // UI状態更新: ボックスの幅をシームレスにアニメーション
+            const oldWidth = containerEl.getBoundingClientRect().width;
+            
+            // 計測のために一時的にトランジションを解除
+            containerEl.style.transition = 'none';
+            targetWordEl.innerText = targetWord;
+            containerEl.style.width = 'auto';
+            
+            // 新しい幅を計測
+            const newWidth = containerEl.getBoundingClientRect().width;
+            
+            // アニメーション開始位置（古い幅）に強制リセット
+            containerEl.style.width = `${oldWidth}px`;
+            
+            // 背景色と文字色を更新（白背景、黒文字、角丸なし）
+            containerEl.classList.add('bg-white');
+            targetWordEl.classList.remove('text-white');
+            targetWordEl.classList.add('text-black');
+
+            // ブラウザに強制的に再描画(リフロー)させる
+            void containerEl.offsetHeight;
+            
+            // トランジションを再設定して新しい幅へアニメーションさせる
+            containerEl.style.transition = 'width 0.6s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.5s';
+            containerEl.style.width = `${newWidth}px`;
+
+            inputEl.disabled = true;
+            btnEl.disabled = true;
+            btnEl.innerText = "計算中...";
+
+            if (resultArea.classList.contains('hidden')) {
+                resultArea.classList.remove('hidden');
+                resultArea.classList.add('fade-in');
+                graphContainer.classList.add('slide-up');
+            }
+
+            try {
+                // 入力単語のベクトル取得
+                const targetOutput = await extractor(targetWord, { pooling: 'mean', normalize: true });
+                const vecTarget = targetOutput.data;
+                
+                // 生のコサイン類似度 (-1.0 to 1.0) を取得
+                const rawSimA = cosineSimilarity(vecA, vecTarget);
+                const rawSimB = cosineSimilarity(vecB, vecTarget);
+                
+                // 絶対パーセンテージ (0%以下は0%として表示をクリップ)
+                const absPctA = Math.max(0, rawSimA * 100);
+                const absPctB = Math.max(0, rawSimB * 100);
+
+                // 温度付きSoftmax関数による相対的な割合の計算
+                const { relA, relB } = calculateSoftmaxRelativeScores(rawSimA, rawSimB, CONFIG.temperature);
+
+                // 大きな数字のCountUpアニメーション
+                if (!countUpAnim) {
+                    countUpAnim = new CountUp('score', relA, { decimalPlaces: 1, suffix: '%', duration: 2.0 });
+                } else {
+                    countUpAnim.update(relA);
+                }
+                countUpAnim.start();
+
+                // バーグラフ幅の更新
+                barA.style.width = `${relA}%`;
+
+                // ラベルテキストの更新 (単語: 相対% (絶対%))
+                document.getElementById('label-a').innerText = `${CONFIG.wordA}: ${relA.toFixed(1)}% (${absPctA.toFixed(1)}%)`;
+                document.getElementById('label-b').innerText = `${CONFIG.wordB}: ${relB.toFixed(1)}% (${absPctB.toFixed(1)}%)`;
+
+                // ハイライト表示の調整
+                if (relA >= relB) {
+                    document.getElementById('label-a').className = "text-white font-bold transition-colors";
+                    document.getElementById('label-b').className = "text-zinc-500 transition-colors";
+                } else {
+                    document.getElementById('label-a').className = "text-zinc-500 transition-colors";
+                    document.getElementById('label-b').className = "text-white font-bold transition-colors";
+                }
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('score').innerText = "Error";
+            } finally {
+                // UI復帰
+                inputEl.disabled = false;
+                btnEl.disabled = false;
+                btnEl.innerText = "判定";
+                inputEl.value = "";
+                inputEl.focus();
+            }
+        }
+
+        document.getElementById('check-btn').addEventListener('click', analyzeWord);
+        document.getElementById('word-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') analyzeWord();
+        });
+
+        init();
+    </script>
+</body>
+</html>
